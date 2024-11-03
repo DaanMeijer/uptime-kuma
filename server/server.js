@@ -90,7 +90,8 @@ const Monitor = require("./model/monitor");
 const User = require("./model/user");
 
 log.debug("server", "Importing Settings");
-const { initJWTSecret, checkLogin, doubleCheckPassword, shake256, SHAKE256_LENGTH, allowDevAllOrigin } = require("./util-server");
+const { getSettings, setSettings, setting, initJWTSecret, checkLogin, doubleCheckPassword, shake256, SHAKE256_LENGTH, allowDevAllOrigin,
+} = require("./util-server");
 
 log.debug("server", "Importing Notification");
 const { Notification } = require("./notification");
@@ -200,7 +201,7 @@ let needSetup = false;
     // Entry Page
     app.get("/", async (request, response) => {
         let hostname = request.hostname;
-        if (await Settings.get("trustProxy")) {
+        if (await setting("trustProxy")) {
             const proxy = request.headers["x-forwarded-host"];
             if (proxy) {
                 hostname = proxy;
@@ -280,7 +281,7 @@ let needSetup = false;
     // Robots.txt
     app.get("/robots.txt", async (_request, response) => {
         let txt = "User-agent: *\nDisallow:";
-        if (!await Settings.get("searchEngineIndex")) {
+        if (!await setting("searchEngineIndex")) {
             txt += " /";
         }
         response.setHeader("Content-Type", "text/plain");
@@ -717,6 +718,8 @@ let needSetup = false;
 
                 monitor.conditions = JSON.stringify(monitor.conditions);
 
+                monitor.rabbitmqNodes = JSON.stringify(monitor.rabbitmqNodes);
+
                 bean.import(monitor);
                 bean.user_id = socket.userID;
 
@@ -867,6 +870,9 @@ let needSetup = false;
                 bean.snmpOid = monitor.snmpOid;
                 bean.jsonPathOperator = monitor.jsonPathOperator;
                 bean.timeout = monitor.timeout;
+                bean.rabbitmqNodes = JSON.stringify(monitor.rabbitmqNodes);
+                bean.rabbitmqUsername = monitor.rabbitmqUsername;
+                bean.rabbitmqPassword = monitor.rabbitmqPassword;
                 bean.conditions = JSON.stringify(monitor.conditions);
 
                 bean.validate();
@@ -1326,7 +1332,7 @@ let needSetup = false;
         socket.on("getSettings", async (callback) => {
             try {
                 checkLogin(socket);
-                const data = await Settings.getSettings("general");
+                const data = await getSettings("general");
 
                 if (!data.serverTimezone) {
                     data.serverTimezone = await server.getTimezone();
@@ -1354,7 +1360,7 @@ let needSetup = false;
                 // Disabled Auth + Want to Enable Auth => No Check
                 // Enabled Auth + Want to Disable Auth => Check!!
                 // Enabled Auth + Want to Enable Auth => No Check
-                const currentDisabledAuth = await Settings.get("disableAuth");
+                const currentDisabledAuth = await setting("disableAuth");
                 if (!currentDisabledAuth && data.disableAuth) {
                     await doubleCheckPassword(socket, currentPassword);
                 }
@@ -1368,7 +1374,7 @@ let needSetup = false;
                 const previousChromeExecutable = await Settings.get("chromeExecutable");
                 const previousNSCDStatus = await Settings.get("nscd");
 
-                await Settings.setSettings("general", data);
+                await setSettings("general", data);
                 server.entryPage = data.entryPage;
 
                 // Also need to apply timezone globally
@@ -1464,7 +1470,7 @@ let needSetup = false;
                 });
 
             } catch (e) {
-                log.error("server", e);
+                console.error(e);
 
                 callback({
                     ok: false,
@@ -1577,7 +1583,7 @@ let needSetup = false;
         // ***************************
 
         log.debug("auth", "check auto login");
-        if (await Settings.get("disableAuth")) {
+        if (await setting("disableAuth")) {
             log.info("auth", "Disabled Auth: auto login to admin");
             await afterLogin(socket, await R.findOne("user"));
             socket.emit("autoLogin");
@@ -1598,17 +1604,19 @@ let needSetup = false;
 
     await server.start();
 
-    server.httpServer.listen(port, hostname, () => {
+    server.httpServer.listen(port, hostname, async () => {
         if (hostname) {
             log.info("server", `Listening on ${hostname}:${port}`);
         } else {
             log.info("server", `Listening on ${port}`);
         }
-        startMonitors();
+        await startMonitors();
+
+        // Put this here. Start background jobs after the db and server is ready to prevent clear up during db migration.
+        await initBackgroundJobs();
+
         checkVersion.startInterval();
     });
-
-    await initBackgroundJobs();
 
     // Start cloudflared at the end if configured
     await cloudflaredAutoStart(cloudflaredToken);
@@ -1708,7 +1716,7 @@ async function initDatabase(testMode = false) {
     log.info("server", "Connected to the database");
 
     // Patch the database
-    await Database.patch();
+    await Database.patch(port, hostname);
 
     let jwtSecretBean = await R.findOne("setting", " `key` = ? ", [
         "jwtSecret",
@@ -1803,7 +1811,11 @@ async function startMonitors() {
     }
 
     for (let monitor of list) {
-        await monitor.start(io);
+        try {
+            await monitor.start(io);
+        } catch (e) {
+            log.error("monitor", e);
+        }
         // Give some delays, so all monitors won't make request at the same moment when just start the server.
         await sleep(getRandomInt(300, 1000));
     }

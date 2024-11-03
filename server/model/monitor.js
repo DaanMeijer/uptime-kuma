@@ -4,7 +4,7 @@ const { Prometheus } = require("../prometheus");
 const { log, UP, DOWN, PENDING, MAINTENANCE, flipStatus, MAX_INTERVAL_SECOND, MIN_INTERVAL_SECOND,
     SQL_DATETIME_FORMAT, evaluateJsonQuery
 } = require("../../src/util");
-const { tcping, ping, checkCertificate, checkStatusCode, getTotalClientInRoom, mssqlQuery, postgresQuery, mysqlQuery, httpNtlm, radius, grpcQuery,
+const { tcping, ping, checkCertificate, checkStatusCode, getTotalClientInRoom, setting, mssqlQuery, postgresQuery, mysqlQuery, setSetting, httpNtlm, radius, grpcQuery,
     redisPingAsync, kafkaProducerAsync, getOidcTokenClientCredentials, rootCertificatesFingerprints, axiosAbortSignal
 } = require("../util-server");
 const { R } = require("redbean-node");
@@ -24,7 +24,6 @@ const { CookieJar } = require("tough-cookie");
 const { HttpsCookieAgent } = require("http-cookie-agent/http");
 const https = require("https");
 const http = require("http");
-const { Settings } = require("../settings");
 
 const rootCertificates = rootCertificatesFingerprints();
 
@@ -154,6 +153,7 @@ class Monitor extends BeanModel {
             snmpOid: this.snmpOid,
             jsonPathOperator: this.jsonPathOperator,
             snmpVersion: this.snmpVersion,
+            rabbitmqNodes: JSON.parse(this.rabbitmqNodes),
             conditions: JSON.parse(this.conditions),
         };
 
@@ -184,6 +184,8 @@ class Monitor extends BeanModel {
                 tlsCert: this.tlsCert,
                 tlsKey: this.tlsKey,
                 kafkaProducerSaslOptions: JSON.parse(this.kafkaProducerSaslOptions),
+                rabbitmqUsername: this.rabbitmqUsername,
+                rabbitmqPassword: this.rabbitmqPassword,
             };
         }
 
@@ -326,7 +328,7 @@ class Monitor extends BeanModel {
         let previousBeat = null;
         let retries = 0;
 
-        this.prometheus = await Prometheus.createAndInitMetrics(this);
+        this.prometheus = new Prometheus(this);
 
         const beat = async () => {
 
@@ -652,7 +654,7 @@ class Monitor extends BeanModel {
 
                 } else if (this.type === "steam") {
                     const steamApiUrl = "https://api.steampowered.com/IGameServersService/GetServerList/v1/";
-                    const steamAPIKey = await Settings.get("steamAPIKey");
+                    const steamAPIKey = await setting("steamAPIKey");
                     const filter = `addr\\${this.hostname}:${this.port}`;
 
                     if (!steamAPIKey) {
@@ -978,7 +980,7 @@ class Monitor extends BeanModel {
             await R.store(bean);
 
             log.debug("monitor", `[${this.name}] prometheus.update`);
-            await this.prometheus?.update(bean, tlsInfo);
+            this.prometheus?.update(bean, tlsInfo);
 
             previousBeat = bean;
 
@@ -1374,12 +1376,11 @@ class Monitor extends BeanModel {
                 return;
             }
 
-            let notifyDays = await Settings.get("tlsExpiryNotifyDays");
+            let notifyDays = await setting("tlsExpiryNotifyDays");
             if (notifyDays == null || !Array.isArray(notifyDays)) {
                 // Reset Default
-                await Settings.set("tlsExpiryNotifyDays", [ 7, 14, 21 ], "general");
+                await setSetting("tlsExpiryNotifyDays", [ 7, 14, 21 ], "general");
                 notifyDays = [ 7, 14, 21 ];
-                await Settings.set("tlsExpiryNotifyDays", notifyDays, "general");
             }
 
             if (Array.isArray(notifyDays)) {
@@ -1510,10 +1511,8 @@ class Monitor extends BeanModel {
         return await R.getAll(`
             SELECT monitor_notification.monitor_id, monitor_notification.notification_id
             FROM monitor_notification
-            WHERE monitor_notification.monitor_id IN (?)
-        `, [
-            monitorIDs,
-        ]);
+            WHERE monitor_notification.monitor_id IN (${monitorIDs.map((_) => "?").join(",")})
+        `, monitorIDs);
     }
 
     /**
@@ -1523,13 +1522,11 @@ class Monitor extends BeanModel {
      */
     static async getMonitorTag(monitorIDs) {
         return await R.getAll(`
-            SELECT monitor_tag.monitor_id, tag.name, tag.color
+            SELECT monitor_tag.monitor_id, monitor_tag.tag_id, monitor_tag.value, tag.name, tag.color
             FROM monitor_tag
             JOIN tag ON monitor_tag.tag_id = tag.id
-            WHERE monitor_tag.monitor_id IN (?)
-        `, [
-            monitorIDs,
-        ]);
+            WHERE monitor_tag.monitor_id IN (${monitorIDs.map((_) => "?").join(",")})
+        `, monitorIDs);
     }
 
     /**
@@ -1569,6 +1566,9 @@ class Monitor extends BeanModel {
                     tagsMap.set(row.monitor_id, []);
                 }
                 tagsMap.get(row.monitor_id).push({
+                    tag_id: row.tag_id,
+                    monitor_id: row.monitor_id,
+                    value: row.value,
                     name: row.name,
                     color: row.color
                 });

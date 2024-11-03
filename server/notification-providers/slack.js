@@ -1,8 +1,7 @@
 const NotificationProvider = require("./notification-provider");
 const axios = require("axios");
+const { setSettings, setting } = require("../util-server");
 const { getMonitorRelativeURL, UP } = require("../../src/util");
-const { Settings } = require("../settings");
-const { log } = require("../../src/util");
 
 class Slack extends NotificationProvider {
     name = "slack";
@@ -15,13 +14,15 @@ class Slack extends NotificationProvider {
      * @returns {Promise<void>}
      */
     static async deprecateURL(url) {
-        let currentPrimaryBaseURL = await Settings.get("primaryBaseURL");
+        let currentPrimaryBaseURL = await setting("primaryBaseURL");
 
         if (!currentPrimaryBaseURL) {
-            log.error("notification", "Move the url to be the primary base URL");
-            await Settings.set("primaryBaseURL", url, "general");
+            console.log("Move the url to be the primary base URL");
+            await setSettings("general", {
+                primaryBaseURL: url,
+            });
         } else {
-            log.debug("notification", "Already there, no need to move the primary base URL");
+            console.log("Already there, no need to move the primary base URL");
         }
     }
 
@@ -31,7 +32,7 @@ class Slack extends NotificationProvider {
      * @param {object} monitorJSON The monitor config
      * @returns {Array} The relevant action objects
      */
-    static buildActions(baseURL, monitorJSON) {
+    buildActions(baseURL, monitorJSON) {
         const actions = [];
 
         if (baseURL) {
@@ -47,7 +48,7 @@ class Slack extends NotificationProvider {
 
         }
 
-        const address = this.extractAdress(monitorJSON);
+        const address = this.extractAddress(monitorJSON);
         if (address) {
             actions.push({
                 "type": "button",
@@ -72,7 +73,7 @@ class Slack extends NotificationProvider {
      * @param {string} msg The message body
      * @returns {Array<object>} The rich content blocks for the Slack message
      */
-    static buildBlocks(baseURL, monitorJSON, heartbeatJSON, title, msg) {
+    buildBlocks(baseURL, monitorJSON, heartbeatJSON, title, msg) {
 
         //create an array to dynamically add blocks
         const blocks = [];
@@ -135,7 +136,7 @@ class Slack extends NotificationProvider {
                 return okMsg;
             }
 
-            const baseURL = await Settings.get("primaryBaseURL");
+            const baseURL = await setting("primaryBaseURL");
 
             const title = "Uptime Kuma Alert";
             let data = {
@@ -149,7 +150,7 @@ class Slack extends NotificationProvider {
                 data.attachments.push(
                     {
                         "color": (heartbeatJSON["status"] === UP) ? "#2eb886" : "#e01e5a",
-                        "blocks": Slack.buildBlocks(baseURL, monitorJSON, heartbeatJSON, title, msg),
+                        "blocks": this.buildBlocks(baseURL, monitorJSON, heartbeatJSON, title, msg),
                     }
                 );
             } else {
